@@ -1,0 +1,392 @@
+Program.Sub.ScreenSU.Start
+Gui.Progress..Create
+Gui.Progress..Caption("Progress")
+Gui.Progress..Size(18210,1215)
+Gui.Progress..MinX(0)
+Gui.Progress..MinY(0)
+Gui.Progress..Position(0,0)
+Gui.Progress..BackColor(-2147483633)
+Gui.Progress..MousePointer(0)
+Gui.Progress..Event(UnLoad,UnLoad)
+Gui.Progress.proBar.Create(ProgressBar)
+Gui.Progress.proBar.Size(17535,255)
+Gui.Progress.proBar.Position(255,330)
+Program.Sub.ScreenSU.End
+
+Program.Sub.Preflight.Start
+F.Data.DataTable.Create("MasterBOMExplode",True)
+F.Data.DataTable.AddColumn("MasterBOMExplode","TRMNL","String")
+F.Data.DataTable.AddColumn("MasterBOMExplode","RPTID","String")
+F.Data.DataTable.AddColumn("MasterBOMExplode","Parent_Key","String")
+F.Data.DataTable.AddColumn("MasterBOMExplode","SEQUENCE","String")
+F.Data.DataTable.AddColumn("MasterBOMExplode","Rec_Type","String")
+F.Data.DataTable.AddColumn("MasterBOMExplode","Rec_Seq","String")
+F.Data.DataTable.AddColumn("MasterBOMExplode","QTY","Float")
+F.Data.DataTable.AddColumn("MasterBOMExplode","LEVEL","String")
+F.Data.DataTable.AddColumn("MasterBOMExplode","DESCRIPTION","String")
+F.Data.DataTable.AddColumn("MasterBOMExplode","PARENT","String")
+F.Data.DataTable.AddColumn("MasterBOMExplode","UNIT","String")
+F.Data.DataTable.AddColumn("MasterBOMExplode","STD_Cost","Float")
+F.Data.DataTable.AddColumn("MasterBOMExplode","OnHand","Float")
+F.Data.DataTable.AddColumn("MasterBOMExplode","OnOrd","Float")
+F.Data.DataTable.AddColumn("MasterBOMExplode","Req","Float")
+
+V.Global.sCurrentParentKey.Declare(String)
+V.Global.iCurrentChildDataTableID.Declare(Long,0)
+V.Global.iRPTID.Declare(Long)
+V.Global.iCurrentBomExplodeSequence.Declare(Long,0)
+V.Global.iCurrentRecSeq.Declare(Long,0)
+V.Global.iCurrentLinesLevel.Declare(Long,0)
+
+F.Global.BI.GetRunID(V.Global.iRPTID)
+Program.Sub.Preflight.End
+	
+Program.Sub.Main.Start
+'BN, Nov 2, 2017
+'Updated by KC on Mar 3, 2018
+'This project will explode all parent boms then save data to BI_Bom_Explode. Each time running, it will delete old data from BI_Bom_Explode.
+F.Intrinsic.Control.Try
+	V.Local.iCount.Declare(Long)
+	
+	F.ODBC.Connection!con.OpenCompanyConnection(30000)	
+	
+	Gui.Progress..Show
+	F.Data.DataTable.CreateFromSQL("ParentBOMs","con","SELECT Part, Description FROM BOM_ENG WHERE Is_Parent = 'Y' ORDER BY Part",True)
+	Gui.Progress.proBar.Max(v.DataTable.ParentBOMs.RowCount)
+	
+	
+	'Start Logging
+	F.Intrinsic.Control.CallSub(WriteLog,"Content","Started Process")
+	'End Logging
+	
+	F.Intrinsic.Control.For(V.local.iCount,0,V.DataTable.ParentBOMs.RowCount--,1)
+		Gui.Progress.proBar.Value(V.Local.iCount)
+		
+		V.Global.sCurrentParentKey.Set(V.DataTable.ParentBOMs(V.Local.iCount).Part!FieldValString)
+		f.Intrinsic.Control.CallSub(ExplodeBOM)
+		
+	f.Intrinsic.Control.Next(V.Local.iCount)
+	
+	'Start Logging
+	F.Intrinsic.Control.CallSub(WriteLog,"Content","Data Gathered")
+	'End Logging
+	
+	F.Intrinsic.Control.CallSub(FillMasterTable)
+	F.Intrinsic.Control.CallSub(WriteMasterTable)
+	
+	Gui.Progress..Visible(False)
+	
+	
+	'Start Logging
+	F.Intrinsic.Control.CallSub(WriteLog,"Content","Finished Process")
+	'End Logging
+	
+	F.Intrinsic.Control.CallSub(UnLoad)
+F.Intrinsic.Control.Catch
+	F.Intrinsic.Control.CallSub(CatchError, "Sub", V.Ambient.CurrentSubroutine, "ErrNo", V.Ambient.ErrorNumber, "ErrDesc", V.Ambient.ErrorDescription)
+F.Intrinsic.Control.EndTry
+Program.Sub.Main.End
+
+Program.Sub.ExplodeBOM.Start
+F.Intrinsic.Control.Try
+	V.Local.sSQL.Declare(String)
+	V.Local.iSingleBomRowCount.Declare(Long,0)
+	V.Local.fParentQuantity.Declare(Float)
+	V.Local.fLineQuantity.Declare(Float)
+	
+	'Each time this sub is entered we are going to explode a brand new BOM and so the RecSeq and currentlevel are reset to 0
+	V.Global.iCurrentRecSeq.Set(0)
+	V.Global.iCurrentLinesLevel.Set(0)
+	
+	F.Intrinsic.Control.If(V.DataTable.SingleBOM.Exists)
+		F.Data.DataTable.Close("SingleBOM")
+	F.Intrinsic.Control.EndIf
+	
+	F.Intrinsic.String.Build("Select Parent, Part, Quantity, Cost, UM_Inventory, Quantity_6, Source, Sequence_BOM FROM BOM_MSTR WHERE Parent = '{0}' ORDER BY Sequence_Bom",V.Global.sCurrentParentKey,v.Local.sSQL)
+	F.Data.DataTable.CreateFromSQL("SingleBOM","con",V.Local.sSQL, True)
+	
+	'This will loop through the parent record and all level 1 records of the bom_mstr. We will have to look through each parent to find children each time for level 2 and lower.
+	F.Intrinsic.Control.For(V.Local.iSingleBomRowCount,0,V.DataTable.SingleBOM.RowCount--,1)
+		
+		F.Intrinsic.Control.If(V.DataTable.SingleBOM(V.Local.iSingleBomRowCount).Sequence_BOM!FieldValFloat,=,0)		
+			F.Intrinsic.Control.CallSub(AddRowToMasterTable,"DataTable","SingleBOM","DataTableRow",V.Local.iSingleBomRowCount)
+			'The customer does not want the quantities for children multiplied by the Parent level component so we set the parent quantity to 1
+			'so that the level 1 component quantities are multiplied by 1 and stay constant.
+			V.Local.fParentQuantity.Set(1)
+		
+		'The first row of the datatable will be the parent so we will ignore any of its children since they are in the SingleBOM table already
+		F.Intrinsic.Control.Else
+			F.Intrinsic.Control.CallSub(AddRowToMasterTable,"DataTable","SingleBOM","DataTableRow",V.Local.iSingleBomRowCount,"ParentQuantity",V.Local.fParentQuantity)
+			F.Intrinsic.Math.Mult(V.Local.fParentQuantity,V.DataTable.SingleBOM(V.Local.iSingleBomRowCount).Quantity!FieldValFloat,V.Local.fLineQuantity)
+			F.Intrinsic.Control.CallSub(SearchForChildBOMComponents,"SearchPart",V.DataTable.SingleBOM(V.Local.iSingleBomRowCount).Part!FieldValString,"ParentQuantity",V.Local.fLineQuantity)
+		F.Intrinsic.Control.EndIf
+		
+		'After the first row current lines level will be 1. As well, if it is changed in the search for 2+ level BOMs it is reset to 1 here for the next level 1 child in SingleBOM
+		V.Global.iCurrentLinesLevel.Set(1)
+	F.Intrinsic.Control.Next(V.Local.iSingleBomRowCount)
+	
+F.Intrinsic.Control.Catch
+	F.Intrinsic.Control.CallSub(CatchError, "Sub", V.Ambient.CurrentSubroutine, "ErrNo", V.Ambient.ErrorNumber, "ErrDesc", V.Ambient.ErrorDescription)
+F.Intrinsic.Control.EndTry
+Program.Sub.ExplodeBOM.End
+
+'Receives a Parent Key, DataTable Name, and DataTableRow Number and adds the data for that row to the Master Table
+Program.Sub.AddRowToMasterTable.Start
+F.Intrinsic.Control.Try
+	V.Local.sRecType.Declare(String)
+	V.Local.sPart.Declare(String)
+	V.Local.sUnitOfMeasure.Declare(String)
+	V.Local.sDataTable.Declare(String)
+	V.Local.sRecSeq.Declare(String)
+	V.Local.sSequence.Declare(String)
+	V.Local.iDataTableRow.Declare(Long)
+	V.Local.fCost.Declare(Float)
+	V.Local.fQty.Declare(Float)
+	V.Local.bQtyPassed.Declare(Boolean)
+	
+	V.Local.sDataTable.Set(V.Args.DataTable)
+	V.Local.iDataTableRow.Set(V.Args.DataTableRow)
+	
+	V.Local.sUnitOfMeasure.Set(V.DataTable.[V.Local.sDataTable](V.Local.iDataTableRow).UM_Inventory!FieldValString)
+	V.Local.sPart.Set(V.DataTable.[V.Local.sDataTable](V.Local.iDataTableRow).Part!FieldValString)
+	V.Local.fCost.Set(V.DataTable.[V.Local.sDataTable](V.Local.iDataTableRow).Cost!FieldValFloat)
+	
+	F.Intrinsic.Variable.ArgExists("ParentQuantity",V.Local.bQtyPassed)
+	
+	F.Intrinsic.Control.If(V.Local.bQtyPassed)
+		F.Intrinsic.Math.Mult(V.DataTable.[V.Local.sDataTable](V.Local.iDataTableRow).Quantity!FieldValFloat,V.Args.ParentQuantity,V.Local.fQty)
+	F.Intrinsic.Control.Else
+		V.Local.fQty.Set(V.DataTable.[V.Local.sDataTable](V.Local.iDataTableRow).Quantity!FieldValFloat)
+	F.Intrinsic.Control.EndIf
+	
+	F.Intrinsic.Control.IIF(V.Global.iCurrentRecSeq,=,0,"H","L",V.Local.sRecType)
+	
+	'BomExplodeSequence and CurrentRecSeq will only ever be incremented through this sub to make keeping track of them easy. Current Rec should be 0 for first row so it is incremented after the row is added.
+	F.Intrinsic.Math.Add(V.Global.iCurrentBomExplodeSequence,1,V.Global.iCurrentBomExplodeSequence)
+	
+	'RecSeq and Sequence are strings that are LPadded with 0's to 6 so we take care of that here. Have to pad after the addition.
+	F.Intrinsic.String.LPad(V.Global.iCurrentRecSeq,"0",6,V.Local.sRecSeq)
+	F.Intrinsic.String.LPad(V.Global.iCurrentBomExplodeSequence,"0",6,V.Local.sSequence)
+	
+	F.Data.DataTable.AddRow("MasterBOMExplode","Parent_Key",V.Global.sCurrentParentKey,"SEQUENCE",V.Local.sSequence,"Rec_Type",V.Local.sRecType,"Rec_Seq",V.Local.sRecSeq,"QTY",V.Local.fQty,"Level",V.Global.iCurrentLinesLevel,"Parent",V.Local.sPart,"UNIT",V.Local.sUnitOfMeasure,"STD_Cost",V.Local.fCost)
+	
+	F.Intrinsic.Math.Add(V.Global.iCurrentRecSeq,1,V.Global.iCurrentRecSeq)
+
+F.Intrinsic.Control.Catch
+	F.Intrinsic.Control.CallSub(CatchError, "Sub", V.Ambient.CurrentSubroutine, "ErrNo", V.Ambient.ErrorNumber, "ErrDesc", V.Ambient.ErrorDescription)
+F.Intrinsic.Control.EndTry
+Program.Sub.AddRowToMasterTable.End
+
+'Receives a datatable row number and searches for children BOM components for the row. When they are found they are added to the Master Table
+Program.Sub.SearchForChildBOMComponents.Start
+F.Intrinsic.Control.Try
+	V.Local.sSQL.Declare(String)
+	V.Local.sParent.Declare(String)
+	V.Local.iChildBomRowCount.Declare(Long)
+	V.Local.sChildBOMDataTableName.Declare(String)
+	V.Local.fParentQuantity.Declare(Float)
+	V.Local.fLineQuantity.Declare(Float)
+	
+	V.Local.sParent.Set(V.Args.SearchPart)
+	V.Local.fParentQuantity.Set(V.Args.ParentQuantity)
+	
+	'We have to have global DataTables for each level but they can't be named the same and can't be closed until the children datatables are closed.
+	'So here we keep a unique ID for each one that increments each time a child datatable is created
+	F.Intrinsic.Math.Add(V.Global.iCurrentChildDataTableID,1,V.Global.iCurrentChildDataTableID)
+	F.Intrinsic.String.Build("ChildBOM{0}",V.Global.iCurrentChildDataTableID,V.Local.sChildBOMDataTableName)
+	
+	F.Intrinsic.String.Build("Select Parent, Part, Quantity, Cost, UM_Inventory, Quantity_6, Source, Sequence_BOM FROM BOM_MSTR WHERE Parent = '{0}' ORDER BY Sequence_Bom",v.Local.sParent,v.Local.sSQL)
+	F.Data.DataTable.CreateFromSQL(V.Local.sChildBOMDataTableName,"con",V.Local.sSQL, True)
+	
+	'If there are more than 0 rows then we have found child components. In that case we add the child component to the table, search for any child components it may have, then move to the next child component
+	F.Intrinsic.Control.If(V.DataTable.[V.Local.sChildBOMDataTableName].RowCount,>,0)
+		'Increment lines level by 1 as we are on a new level
+		F.Intrinsic.Math.Add(V.Global.iCurrentLinesLevel,1,V.Global.iCurrentLinesLevel)
+		
+		'The first row of each ChildBOM table is the parent itself so we start at 1 to skip it
+		F.Intrinsic.Control.For(V.Local.iChildBomRowCount,1,V.DataTable.[V.Local.sChildBOMDataTableName].RowCount--,1)
+			'Line Quantity is equal to the parent quantity times the quantity from the table. This will be used as the parent quantity for child items as well
+			F.Intrinsic.Math.Mult(V.Local.fParentQuantity,V.DataTable.[V.Local.sChildBOMDataTableName](V.Local.iChildBomRowCount).Quantity!FieldValFloat,V.Local.fLineQuantity)
+			
+			'Each child BOM will be added to the master table and have a search for its children performed
+			F.Intrinsic.Control.CallSub(AddRowToMasterTable,"DataTable",V.Local.sChildBOMDataTableName,"DataTableRow",V.Local.iChildBomRowCount,"ParentQuantity",V.Local.fParentQuantity)			
+			F.Intrinsic.Control.CallSub(SearchForChildBOMComponents,"SearchPart",V.DataTable.[V.Local.sChildBOMDataTableName](V.Local.iChildBomRowCount).Part!FieldValString,"ParentQuantity",V.Local.fLineQuantity)
+				
+		F.Intrinsic.Control.Next(V.Local.iChildBomRowCount)
+		
+		'Decrement lines level by 1 as we are going to go back to the previous level
+		F.Intrinsic.Math.Sub(V.Global.iCurrentLinesLevel,1,V.Global.iCurrentLinesLevel)
+		
+	F.Intrinsic.Control.EndIf
+	F.Data.DataTable.Close(V.Local.sChildBOMDataTableName)
+	
+F.Intrinsic.Control.Catch
+	F.Intrinsic.Control.CallSub(CatchError, "Sub", V.Ambient.CurrentSubroutine, "ErrNo", V.Ambient.ErrorNumber, "ErrDesc", V.Ambient.ErrorDescription)
+F.Intrinsic.Control.EndTry
+Program.Sub.SearchForChildBOMComponents.End
+
+'Fills the Master Table with data from dictionary and translates Level from the Long value to the BOM view of Level
+Program.Sub.FillMasterTable.Start
+F.Intrinsic.Control.Try
+	V.Local.iCount.Declare(Long)
+
+	F.Intrinsic.Control.CallSub(CreateDictionaries)
+	
+	F.Data.DataTable.FillFromDictionary("MasterBOMExplode","Part_Description","Parent","Description")
+	F.Data.DataTable.FillFromDictionary("MasterBOMExplode","Part_OnHand","Parent","OnHand")
+	F.Data.DataTable.FillFromDictionary("MasterBOMExplode","Part_OnOrd","Parent","OnOrd")	
+	F.Data.DataTable.FillFromDictionary("MasterBOMExplode","Part_Req","Parent","Req")
+	
+	F.Data.DataTable.SetValue("MasterBOMExplode",-1,"TRMNL",V.Caller.Terminal,"RPTID",V.Global.iRPTID)
+	'Updating level from a number to a proper format for viewing BOMs
+	F.Intrinsic.Control.For(V.Local.iCount,0,V.DataTable.MasterBOMExplode.RowCount--,1)
+		F.Intrinsic.Control.SelectCase(V.DataTable.MasterBOMExplode(V.Local.iCount).Level!FieldValLong)
+			F.Intrinsic.Control.Case(0)
+				F.Data.DataTable.SetValue("MasterBOMExplode",V.Local.iCount,"Level","Parent")
+				
+			F.Intrinsic.Control.Case(1)
+				F.Data.DataTable.SetValue("MasterBOMExplode",V.Local.iCount,"Level","1*******")
+				
+			F.Intrinsic.Control.Case(2)
+				F.Data.DataTable.SetValue("MasterBOMExplode",V.Local.iCount,"Level"," 2******")
+				
+			F.Intrinsic.Control.Case(3)
+				F.Data.DataTable.SetValue("MasterBOMExplode",V.Local.iCount,"Level","  3*****")
+				
+			F.Intrinsic.Control.Case(4)
+				F.Data.DataTable.SetValue("MasterBOMExplode",V.Local.iCount,"Level","   4****")
+				
+			F.Intrinsic.Control.Case(5)
+				F.Data.DataTable.SetValue("MasterBOMExplode",V.Local.iCount,"Level","    5***")
+				
+			F.Intrinsic.Control.Case(6)
+				F.Data.DataTable.SetValue("MasterBOMExplode",V.Local.iCount,"Level","     6**")
+				
+			F.Intrinsic.Control.Case(7)
+				F.Data.DataTable.SetValue("MasterBOMExplode",V.Local.iCount,"Level","      7*")
+				
+			F.Intrinsic.Control.Case(8)
+				F.Data.DataTable.SetValue("MasterBOMExplode",V.Local.iCount,"Level","       8")
+		
+		F.Intrinsic.Control.EndSelect
+	
+	F.Intrinsic.Control.Next(V.Local.iCount)
+	
+	F.Intrinsic.Control.CallSub(CloseDictionaries)
+F.Intrinsic.Control.Catch
+	F.Intrinsic.Control.CallSub(CatchError, "Sub", V.Ambient.CurrentSubroutine, "ErrNo", V.Ambient.ErrorNumber, "ErrDesc", V.Ambient.ErrorDescription)
+F.Intrinsic.Control.EndTry
+Program.Sub.FillMasterTable.End
+
+'Clears BI_BOM_Exploe and then writes the master table data to the BI_Bom_Explode table
+Program.Sub.WriteMasterTable.Start
+F.Intrinsic.Control.Try
+
+	F.ODBC.Connection!con.Execute("Delete from BI_Bom_Explode")
+	f.Data.DataTable.SaveToDB("MasterBOMExplode","con","BI_Bom_Explode","",128,"TRMNL@!@TRMNL*!*RPTID@!@RPTID*!*Parent_Key@!@Parent_Key*!*SEQUENCE@!@SEQUENCE*!*Rec_Type@!@Rec_Type*!*Rec_Seq@!@Rec_Seq*!*LEVEL@!@LEVEL*!*DESCRIPTION@!@DESCRIPTION*!*PARENT@!@PARENT*!*UNIT@!@UNIT*!*QTY@!@QTY*!*STD_Cost@!@STD_Cost*!*OnHand@!@OnHand*!*OnOrd@!@OnOrd*!*Req@!@Req")		
+	f.ODBC.Connection!con.Execute("Update BI_Bom_Explode set Net = OnHand + OnOrd - Req")
+	
+F.Intrinsic.Control.Catch
+	F.Intrinsic.Control.CallSub(CatchError, "Sub", V.Ambient.CurrentSubroutine, "ErrNo", V.Ambient.ErrorNumber, "ErrDesc", V.Ambient.ErrorDescription)
+F.Intrinsic.Control.EndTry
+Program.Sub.WriteMasterTable.End
+
+Program.Sub.CreateDictionaries.Start
+F.Intrinsic.Control.Try
+	'Description
+	F.Data.Dictionary.CreateFromSQL("Part_Description","con","SELECT Part, Description FROM BOM_ENG WHERE Part <> ''")
+	F.Data.Dictionary.SetDefaultReturn("Part_Description","")
+	
+	'OnHand
+	F.Data.Dictionary.CreateFromSQL("Part_OnHand","con","SELECT Part, Qty_OnHand FROM Inventory_Mstr")
+	F.Data.Dictionary.SetDefaultReturn("Part_OnHand",0)
+	
+	'OnOrd
+	F.Data.Dictionary.CreateFromSQL("Part_OnOrd","con","SELECT Part, Qty_OnOrder_PO + Qty_OnOrder_WO FROM Inventory_Mstr")
+	F.Data.Dictionary.SetDefaultReturn("Part_OnOrd",0)
+	
+	'Req
+	F.Data.Dictionary.CreateFromSQL("Part_Req","con","SELECT Part, Qty_Required FROM Inventory_Mstr")
+	F.Data.Dictionary.SetDefaultReturn("Part_Req",0)
+	
+F.Intrinsic.Control.Catch
+	F.Intrinsic.Control.CallSub(CatchError, "Sub", V.Ambient.CurrentSubroutine, "ErrNo", V.Ambient.ErrorNumber, "ErrDesc", V.Ambient.ErrorDescription)
+F.Intrinsic.Control.EndTry
+Program.Sub.CreateDictionaries.End
+
+Program.Sub.CloseDictionaries.Start
+F.Intrinsic.Control.Try
+	V.Local.bDictionaryExists.Declare(Boolean)
+	
+	F.Data.Dictionary.Exists("Part_Description",V.Local.bDictionaryExists)
+	F.Intrinsic.Control.If(V.Local.bDictionaryExists)
+		F.Data.Dictionary.Close("Part_Description")
+	F.Intrinsic.Control.EndIf
+	
+	F.Data.Dictionary.Exists("Part_OnHand",V.Local.bDictionaryExists)
+	F.Intrinsic.Control.If(V.Local.bDictionaryExists)
+		F.Data.Dictionary.Close("Part_OnHand")
+	F.Intrinsic.Control.EndIf
+	
+	F.Data.Dictionary.Exists("Part_OnOrd",V.Local.bDictionaryExists)
+	F.Intrinsic.Control.If(V.Local.bDictionaryExists)
+		F.Data.Dictionary.Close("Part_OnOrd")
+	F.Intrinsic.Control.EndIf
+	
+	F.Data.Dictionary.Exists("Part_Req",V.Local.bDictionaryExists)
+	F.Intrinsic.Control.If(V.Local.bDictionaryExists)
+		F.Data.Dictionary.Close("Part_Req")
+	F.Intrinsic.Control.EndIf
+	
+F.Intrinsic.Control.Catch
+	F.Intrinsic.Control.CallSub(CatchError, "Sub", V.Ambient.CurrentSubroutine, "ErrNo", V.Ambient.ErrorNumber, "ErrDesc", V.Ambient.ErrorDescription)
+F.Intrinsic.Control.EndTry
+Program.Sub.CloseDictionaries.End
+
+'Standard log writing function
+Program.Sub.WriteLog.Start
+F.Intrinsic.Control.Try
+	V.Local.sFilePath.Declare(String)
+	V.Local.sFileContent.Declare(String)
+	V.Local.bFileExists.Declare(Boolean)
+
+	F.Intrinsic.String.Build("{0}\GCG_4822_BOM_Explode.log",V.Caller.GasDir,V.Local.sFilePath)
+	F.Intrinsic.String.Build("Date: {0}. Time: {1}. Action: {2}.",V.Ambient.Date,V.Ambient.Time,V.Args.Content,V.Local.sFileContent)
+
+	F.Intrinsic.File.Exists(V.Local.sFilePath,V.Local.bFileExists)
+
+	F.Intrinsic.Control.If(V.Local.bFileExists)
+		F.Intrinsic.File.Append2FileNewLine(V.Local.sFilePath,V.Local.sFileContent)
+	F.Intrinsic.Control.Else
+		F.Intrinsic.File.String2File(V.Local.sFilePath,V.Local.sFileContent)
+	F.Intrinsic.Control.EndIf
+	
+F.Intrinsic.Control.Catch
+	F.Intrinsic.Control.CallSub(CatchError, "Sub", V.Ambient.CurrentSubroutine, "ErrNo", V.Ambient.ErrorNumber, "ErrDesc", V.Ambient.ErrorDescription)
+F.Intrinsic.Control.EndTry
+Program.Sub.WriteLog.End
+
+Program.Sub.UnLoad.Start
+f.ODBC.Connection!con.Close
+f.Intrinsic.Control.End
+Program.Sub.UnLoad.End
+
+Program.Sub.CatchError.Start
+V.Local.sError.Declare(String)
+F.Intrinsic.String.Build("GCG_4822_BOM_Explode_Export.g2u{0}{0}Error occurred in subroutine: {1}{0}Error Number: {2}{0}Error Description: {3}", V.Ambient.NewLine, V.Args.Sub, V.Args.ErrNo, V.Args.ErrDesc, V.Local.sError)
+F.Intrinsic.UI.Msgbox(V.Local.sError)
+
+F.Intrinsic.Control.If(V.Args.Sub.UCase,<>,"***UnLoad***")
+	F.Intrinsic.Control.CallSub(UnLoad)
+F.Intrinsic.Control.Else
+	F.Intrinsic.Control.End
+F.Intrinsic.Control.EndIf
+Program.Sub.CatchError.End
+
+Program.Sub.Comments.Start
+${$0$}$$}$$}$11/8/2017 10:46:58 AM$}$False
+${$3$}$0$}$$}$0$}$-1$}$$}$12:00:00 AM$}$This project was quoted by Strider Smith and coded by Sisco Quiroz
+September 2016.
+
+This code will run from a custom menu item under Production>Shop Floor Control>Transactions>Transfer WIP to WIP for multiple jobs.
+Program.Sub.Comments.End
